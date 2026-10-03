@@ -9,7 +9,7 @@ await mongoose.connect(process.env.MONGODB_URI)
 await Question.bulkWrite(data.questions.map((question) => ({
   updateOne: {
     filter: { sourceId: question.id },
-    update: { $set: { sourceId: question.id, text: question.text, topic: question.topic, subtopic: question.subtopic || '', type: question.type, sourceDate: question.sourceDate, approved: Boolean(question.approved) } },
+    update: { $set: { sourceId: question.id, text: question.text, topic: question.topic, subtopic: question.subtopic || '', type: question.type === 'coding' ? 'practical' : question.type, sourceDate: question.sourceDate, approved: Boolean(question.approved) } },
     upsert: true,
   },
 })))

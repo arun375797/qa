@@ -13,5 +13,12 @@ button { -webkit-tap-highlight-color: transparent; }
 .paper-grid { background-image: linear-gradient(rgba(32,32,29,.045) 1px, transparent 1px), linear-gradient(90deg, rgba(32,32,29,.045) 1px, transparent 1px); background-size: 32px 32px; }
 .soft-shadow { box-shadow: 0 18px 60px rgba(34, 35, 29, .08); }
 .question-card { animation: rise .35s ease both; }
+.question-grid { display: grid; }
+.question-header-grid { display: none; }
+@media (min-width: 640px) {
+  .question-grid, .question-header-grid { grid-template-columns: 68px minmax(0, 1fr) 210px 208px; }
+  .question-header-grid { display: grid; }
+  .question-grid { align-items: center; }
+}
 @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; animation-duration: .01ms !important; } }

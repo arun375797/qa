@@ -50,7 +50,7 @@ for (const entry of entries) {
     id: createHash('sha1').update(entry.text).digest('hex').slice(0, 12),
     text: entry.text,
     topic: classify(entry.text),
-    type: codingPattern.test(entry.text) ? 'coding' : 'theory',
+    type: codingPattern.test(entry.text) ? 'practical' : 'theory',
     sourceDate: entry.sourceDate,
   })
 }

@@ -25,7 +25,12 @@ async function readJson(file, fallback = null) {
 async function loadStore() {
   const generated = await readJson(generatedPath, { meta: {}, questions: [] })
   const state = await readJson(statePath)
-  const questions = (state?.questions || generated.questions).map((q) => ({ approved: false, subtopic: '', ...q }))
+  const questions = (state?.questions || generated.questions).map((q) => ({
+    approved: false,
+    subtopic: '',
+    ...q,
+    type: q.type === 'coding' ? 'practical' : (q.type || 'theory'),
+  }))
   const savedTopics = await readJson(topicsPath)
   const names = [...new Set(questions.map((q) => q.topic).filter(Boolean))]
   const topics = savedTopics || names.map((name) => ({ name, subtopics: [] }))
@@ -42,7 +47,7 @@ app.get('/api/questions', async (_request, response, next) => {
     const store = await loadStore()
     const stored = databaseReady ? await Question.find().sort({ sourceId: 1 }).lean() : []
     const questions = stored.length
-      ? stored.map((q) => ({ id: q.sourceId, text: q.text, topic: q.topic, subtopic: q.subtopic || '', type: q.type, sourceDate: q.sourceDate, approved: Boolean(q.approved) }))
+      ? stored.map((q) => ({ id: q.sourceId, text: q.text, topic: q.topic, subtopic: q.subtopic || '', type: q.type === 'coding' ? 'practical' : q.type, sourceDate: q.sourceDate, approved: Boolean(q.approved) }))
       : store.questions
     response.json({ questions, topics: store.topics, meta: { ...store.generated.meta, total: questions.length, source: stored.length ? 'mongodb' : 'local' } })
   } catch (error) { next(error) }
@@ -50,8 +55,11 @@ app.get('/api/questions', async (_request, response, next) => {
 
 app.patch('/api/questions/:id', async (request, response, next) => {
   try {
-    const allowed = ['text', 'topic', 'subtopic', 'approved']
+    const allowed = ['text', 'topic', 'subtopic', 'type', 'approved']
     const updates = Object.fromEntries(Object.entries(request.body).filter(([key]) => allowed.includes(key)))
+    if (updates.type && !['theory', 'practical'].includes(updates.type)) {
+      return response.status(400).json({ message: 'Type must be theory or practical.' })
+    }
     if (databaseReady) {
       const question = await Question.findOneAndUpdate({ sourceId: request.params.id }, { $set: updates }, { new: true })
       if (question) return response.json({ question })
@@ -99,6 +107,70 @@ app.post('/api/topics/:topic/subtopics', async (request, response, next) => {
     if (!topic.subtopics.some((item) => item.toLowerCase() === name.toLowerCase())) topic.subtopics.push(name)
     await saveTopics(store.topics)
     response.status(201).json({ topics: store.topics })
+  } catch (error) { next(error) }
+})
+
+app.patch('/api/topics/:topic', async (request, response, next) => {
+  try {
+    const currentName = request.params.topic
+    const name = String(request.body.name || '').trim()
+    if (!name) return response.status(400).json({ message: 'Topic name is required.' })
+    const store = await loadStore()
+    const topic = store.topics.find((item) => item.name === currentName)
+    if (!topic) return response.status(404).json({ message: 'Topic not found.' })
+    if (store.topics.some((item) => item.name !== currentName && item.name.toLowerCase() === name.toLowerCase())) return response.status(409).json({ message: 'That topic already exists.' })
+    topic.name = name
+    const questions = store.questions.map((question) => question.topic === currentName ? { ...question, topic: name } : question)
+    await Promise.all([saveTopics(store.topics), saveQuestions(questions)])
+    if (databaseReady) await Question.updateMany({ topic: currentName }, { $set: { topic: name } })
+    response.json({ topics: store.topics })
+  } catch (error) { next(error) }
+})
+
+app.delete('/api/topics/:topic', async (request, response, next) => {
+  try {
+    const name = request.params.topic
+    const store = await loadStore()
+    if (!store.topics.some((topic) => topic.name === name)) return response.status(404).json({ message: 'Topic not found.' })
+    const topics = store.topics.filter((topic) => topic.name !== name)
+    if (!topics.some((topic) => topic.name === 'Uncategorized')) topics.push({ name: 'Uncategorized', subtopics: [] })
+    const questions = store.questions.map((question) => question.topic === name ? { ...question, topic: 'Uncategorized', subtopic: '' } : question)
+    await Promise.all([saveTopics(topics), saveQuestions(questions)])
+    if (databaseReady) await Question.updateMany({ topic: name }, { $set: { topic: 'Uncategorized', subtopic: '' } })
+    response.json({ topics })
+  } catch (error) { next(error) }
+})
+
+app.patch('/api/topics/:topic/subtopics/:subtopic', async (request, response, next) => {
+  try {
+    const topicName = request.params.topic
+    const currentName = request.params.subtopic
+    const name = String(request.body.name || '').trim()
+    if (!name) return response.status(400).json({ message: 'Subtopic name is required.' })
+    const store = await loadStore()
+    const topic = store.topics.find((item) => item.name === topicName)
+    if (!topic || !topic.subtopics.includes(currentName)) return response.status(404).json({ message: 'Subtopic not found.' })
+    if (topic.subtopics.some((item) => item !== currentName && item.toLowerCase() === name.toLowerCase())) return response.status(409).json({ message: 'That subtopic already exists.' })
+    topic.subtopics = topic.subtopics.map((item) => item === currentName ? name : item)
+    const questions = store.questions.map((question) => question.topic === topicName && question.subtopic === currentName ? { ...question, subtopic: name } : question)
+    await Promise.all([saveTopics(store.topics), saveQuestions(questions)])
+    if (databaseReady) await Question.updateMany({ topic: topicName, subtopic: currentName }, { $set: { subtopic: name } })
+    response.json({ topics: store.topics })
+  } catch (error) { next(error) }
+})
+
+app.delete('/api/topics/:topic/subtopics/:subtopic', async (request, response, next) => {
+  try {
+    const topicName = request.params.topic
+    const subtopicName = request.params.subtopic
+    const store = await loadStore()
+    const topic = store.topics.find((item) => item.name === topicName)
+    if (!topic || !topic.subtopics.includes(subtopicName)) return response.status(404).json({ message: 'Subtopic not found.' })
+    topic.subtopics = topic.subtopics.filter((item) => item !== subtopicName)
+    const questions = store.questions.map((question) => question.topic === topicName && question.subtopic === subtopicName ? { ...question, subtopic: '' } : question)
+    await Promise.all([saveTopics(store.topics), saveQuestions(questions)])
+    if (databaseReady) await Question.updateMany({ topic: topicName, subtopic: subtopicName }, { $set: { subtopic: '' } })
+    response.json({ topics: store.topics })
   } catch (error) { next(error) }
 })
 

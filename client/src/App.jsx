@@ -2,14 +2,33 @@ import { useEffect, useMemo, useState } from 'react'
 import { Check, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Edit3, FolderInput, LayoutGrid, Minus, Plus, Save, Search, Tags, Trash2, X } from 'lucide-react'
 
 const PAGE_SIZE = 50
+const DATA_CACHE_KEY = 'interview-vault-data-v1'
+
+function readCachedData() {
+  try {
+    const cached = JSON.parse(sessionStorage.getItem(DATA_CACHE_KEY))
+    return Array.isArray(cached?.questions) && Array.isArray(cached?.topics) ? cached : null
+  } catch {
+    return null
+  }
+}
+
+function writeCachedData(questions, topics) {
+  try {
+    sessionStorage.setItem(DATA_CACHE_KEY, JSON.stringify({ questions, topics }))
+  } catch {
+    // The live API remains the source of truth when browser storage is unavailable.
+  }
+}
 
 function CountBadge({ count }) {
   return <span className="absolute -right-2 top-1 grid h-4 min-w-4 place-items-center rounded-full bg-[#ef4444] px-1 mono text-[7px] font-bold leading-none text-white shadow-[0_2px_6px_rgba(239,68,68,.35)]">{count > 99 ? '99+' : count}</span>
 }
 
 function App() {
-  const [questions, setQuestions] = useState([])
-  const [topics, setTopics] = useState([])
+  const [cachedData] = useState(readCachedData)
+  const [questions, setQuestions] = useState(() => cachedData?.questions || [])
+  const [topics, setTopics] = useState(() => cachedData?.topics || [])
   const [view, setView] = useState('organise')
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [query, setQuery] = useState('')
@@ -23,7 +42,7 @@ function App() {
   const [editSubtopicName, setEditSubtopicName] = useState('')
   const [newTopic, setNewTopic] = useState('')
   const [newSubtopic, setNewSubtopic] = useState('')
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(() => !cachedData)
   const [notice, setNotice] = useState('')
   const [activeTopic, setActiveTopic] = useState(() => localStorage.getItem('vault-topic') || '')
   const [activeSubtopic, setActiveSubtopic] = useState(() => localStorage.getItem('vault-subtopic') || '')
@@ -31,13 +50,22 @@ function App() {
   const [mainSubtopic, setMainSubtopic] = useState('')
 
   useEffect(() => {
-    fetch('/api/questions').then((response) => response.json()).then((data) => {
+    const controller = new AbortController()
+    fetch('/api/questions', { signal: controller.signal }).then((response) => response.json()).then((data) => {
       setQuestions(data.questions)
       setTopics(data.topics)
+      writeCachedData(data.questions, data.topics)
       const saved = localStorage.getItem('vault-topic')
       if (!saved || !data.topics.some((topic) => topic.name === saved)) setActiveTopic(data.topics[0]?.name || '')
+    }).catch((error) => {
+      if (error.name !== 'AbortError' && !cachedData) flash('Could not load questions')
     }).finally(() => setLoading(false))
+    return () => controller.abort()
   }, [])
+
+  useEffect(() => {
+    if (!loading && questions.length) writeCachedData(questions, topics)
+  }, [questions, topics, loading])
 
   useEffect(() => {
     localStorage.setItem('vault-topic', activeTopic)
@@ -48,7 +76,7 @@ function App() {
   const headerSubtopic = view === 'main' ? mainSubtopic : activeSubtopic
   const selectedTopic = topics.find((topic) => topic.name === headerTopic)
   const availableSubtopics = selectedTopic?.subtopics || []
-  const approved = questions.filter((question) => question.approved)
+  const approved = useMemo(() => questions.filter((question) => question.approved), [questions])
   const topicCounts = useMemo(() => {
     const counts = new Map()
     for (const question of questions) {
@@ -66,25 +94,25 @@ function App() {
     for (const question of selectedTopicQuestions) counts.set(question.subtopic || '', (counts.get(question.subtopic || '') || 0) + 1)
     return counts
   }, [selectedTopicQuestions])
+  const searchTerms = useMemo(() => query.trim().toLowerCase().split(/\s+/).filter(Boolean), [query])
   const visible = useMemo(() => {
-    const filtered = questions.filter((question) => {
-    if (view === 'main' && !question.approved) return false
-    const searchTerms = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
-    if (!searchTerms.every((term) => question.text.toLowerCase().includes(term))) return false
-    if (typeFilter === 'theory' && question.type !== 'theory') return false
-    if (typeFilter === 'practical' && question.type !== 'practical' && question.type !== 'coding') return false
-    if (view === 'main' && mainTopic && question.topic !== mainTopic) return false
-    if (view === 'main' && mainSubtopic && question.subtopic !== mainSubtopic) return false
-    return true
-    })
+    const pending = []
+    const ready = []
 
-    if (view !== 'organise') return filtered
+    for (const question of questions) {
+      if (view === 'main' && !question.approved) continue
+      if (searchTerms.length && !searchTerms.every((term) => question.text.toLowerCase().includes(term))) continue
+      if (typeFilter === 'theory' && question.type !== 'theory') continue
+      if (typeFilter === 'practical' && question.type !== 'practical' && question.type !== 'coding') continue
+      if (view === 'main' && mainTopic && question.topic !== mainTopic) continue
+      if (view === 'main' && mainSubtopic && question.subtopic !== mainSubtopic) continue
 
-    return [
-      ...filtered.filter((question) => !question.approved),
-      ...filtered.filter((question) => question.approved),
-    ]
-  }, [questions, query, typeFilter, view, mainTopic, mainSubtopic])
+      if (view === 'organise' && question.approved) ready.push(question)
+      else pending.push(question)
+    }
+
+    return view === 'organise' ? pending.concat(ready) : pending
+  }, [questions, searchTerms, typeFilter, view, mainTopic, mainSubtopic])
   const pageCount = Math.max(1, Math.ceil(visible.length / PAGE_SIZE))
   const displayed = visible.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
 

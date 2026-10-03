@@ -15,9 +15,10 @@ const generatedPath = path.resolve(dirname, '../data/questions.generated.json')
 const statePath = path.resolve(dirname, '../data/questions.state.json')
 const topicsPath = path.resolve(dirname, '../data/topics.json')
 let databaseReady = false
+let localStorePromise
 
 const databaseConnection = process.env.MONGODB_URI
-  ? mongoose.connect(process.env.MONGODB_URI)
+  ? mongoose.connect(process.env.MONGODB_URI, { maxPoolSize: 10, serverSelectionTimeoutMS: 5000 })
     .then(() => { databaseReady = true; console.log('MongoDB connected') })
     .catch((error) => console.warn(`MongoDB unavailable; using local persistence (${error.message})`))
   : Promise.resolve()
@@ -36,27 +37,65 @@ async function readJson(file, fallback = null) {
   try { return JSON.parse(await readFile(file, 'utf8')) } catch { return fallback }
 }
 
-async function loadStore() {
-  const generated = await readJson(generatedPath, { meta: {}, questions: [] })
-  const state = await readJson(statePath)
-  const questions = (state?.questions || generated.questions).map((q) => ({
-    approved: false,
-    subtopic: '',
-    ...q,
-    type: q.type === 'coding' ? 'practical' : (q.type || 'theory'),
-  }))
-  const savedTopics = await readJson(topicsPath)
-  const names = [...new Set(questions.map((q) => q.topic).filter(Boolean))]
-  const storedTopics = databaseReady ? await Topic.find().sort({ createdAt: 1, name: 1 }).lean() : []
-  const topics = storedTopics.length
-    ? storedTopics.map(({ name, subtopics }) => ({ name, subtopics }))
-    : (savedTopics || names.map((name) => ({ name, subtopics: [] })))
-  return { generated, questions, topics }
+function toClientQuestion(question) {
+  return {
+    id: question.sourceId || question.id,
+    text: question.text,
+    topic: question.topic,
+    subtopic: question.subtopic || '',
+    type: question.type === 'coding' ? 'practical' : (question.type || 'theory'),
+    approved: Boolean(question.approved),
+  }
 }
 
-const saveQuestions = (questions) => writeFile(statePath, `${JSON.stringify({ questions }, null, 2)}\n`)
+function loadLocalStore() {
+  if (!localStorePromise) {
+    localStorePromise = Promise.all([
+      readJson(generatedPath, { meta: {}, questions: [] }),
+      readJson(statePath),
+      readJson(topicsPath),
+    ]).then(([generated, state, savedTopics]) => {
+      const questions = (state?.questions || generated.questions).map((question) => ({
+        approved: false,
+        subtopic: '',
+        ...question,
+        type: question.type === 'coding' ? 'practical' : (question.type || 'theory'),
+      }))
+      const names = [...new Set(questions.map((question) => question.topic).filter(Boolean))]
+      return {
+        generated,
+        questions,
+        topics: savedTopics || names.map((name) => ({ name, subtopics: [] })),
+      }
+    })
+  }
+  return localStorePromise
+}
+
+async function loadStore() {
+  if (databaseReady) {
+    const topics = await Topic.find().sort({ createdAt: 1, name: 1 }).select('name subtopics -_id').lean()
+    return { generated: { meta: {} }, questions: [], topics }
+  }
+  const store = await loadLocalStore()
+  return {
+    generated: store.generated,
+    questions: store.questions.map((question) => ({ ...question })),
+    topics: store.topics.map((topic) => ({ ...topic, subtopics: [...topic.subtopics] })),
+  }
+}
+
+async function saveQuestions(questions) {
+  const store = await loadLocalStore()
+  store.questions = questions
+  await writeFile(statePath, `${JSON.stringify({ questions }, null, 2)}\n`)
+}
 async function saveTopics(topics) {
-  if (!databaseReady) return writeFile(topicsPath, `${JSON.stringify(topics, null, 2)}\n`)
+  if (!databaseReady) {
+    const store = await loadLocalStore()
+    store.topics = topics
+    return writeFile(topicsPath, `${JSON.stringify(topics, null, 2)}\n`)
+  }
   await Topic.bulkWrite(topics.map((topic) => ({
     updateOne: {
       filter: { name: topic.name },
@@ -71,12 +110,20 @@ app.get('/api/health', (_request, response) => response.json({ ok: true, databas
 
 app.get('/api/questions', async (_request, response, next) => {
   try {
-    const store = await loadStore()
-    const stored = databaseReady ? await Question.find().sort({ sourceId: 1 }).lean() : []
-    const questions = stored.length
-      ? stored.map((q) => ({ id: q.sourceId, text: q.text, topic: q.topic, subtopic: q.subtopic || '', type: q.type === 'coding' ? 'practical' : q.type, sourceDate: q.sourceDate, approved: Boolean(q.approved) }))
-      : store.questions
-    response.json({ questions, topics: store.topics, meta: { ...store.generated.meta, total: questions.length, source: stored.length ? 'mongodb' : 'local' } })
+    if (databaseReady) {
+      const [stored, topics] = await Promise.all([
+        Question.find().sort({ sourceId: 1 }).select('sourceId text topic subtopic type approved -_id').lean(),
+        Topic.find().sort({ createdAt: 1, name: 1 }).select('name subtopics -_id').lean(),
+      ])
+      if (stored.length) {
+        const questions = stored.map(toClientQuestion)
+        return response.json({ questions, topics, meta: { total: questions.length, source: 'mongodb' } })
+      }
+    }
+
+    const store = await loadLocalStore()
+    const questions = store.questions.map(toClientQuestion)
+    response.json({ questions, topics: store.topics, meta: { ...store.generated.meta, total: questions.length, source: 'local' } })
   } catch (error) { next(error) }
 })
 
@@ -88,15 +135,13 @@ app.patch('/api/questions/:id', async (request, response, next) => {
       return response.status(400).json({ message: 'Type must be theory or practical.' })
     }
     if (databaseReady) {
-      const store = await loadStore()
-      const source = store.questions.find((question) => question.id === request.params.id)
-      if (!source) return response.status(404).json({ message: 'Question not found.' })
       const question = await Question.findOneAndUpdate(
         { sourceId: request.params.id },
-        { $set: { sourceId: source.id, text: source.text, topic: source.topic, subtopic: source.subtopic || '', type: source.type, sourceDate: source.sourceDate, approved: Boolean(source.approved), ...updates } },
-        { new: true, upsert: true },
-      )
-      return response.json({ question })
+        { $set: updates },
+        { new: true, runValidators: true },
+      ).select('sourceId text topic subtopic type approved -_id').lean()
+      if (!question) return response.status(404).json({ message: 'Question not found.' })
+      return response.json({ question: toClientQuestion(question) })
     }
     const store = await loadStore()
     const index = store.questions.findIndex((q) => q.id === request.params.id)

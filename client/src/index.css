@@ -1,0 +1,17 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { font-family: 'Manrope', sans-serif; color: #20201d; background: #f6f4ed; font-synthesis: none; }
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; min-width: 320px; min-height: 100vh; }
+button, input { font: inherit; }
+button { -webkit-tap-highlight-color: transparent; }
+::selection { background: #d7ff39; color: #171814; }
+.mono { font-family: 'DM Mono', monospace; }
+.paper-grid { background-image: linear-gradient(rgba(32,32,29,.045) 1px, transparent 1px), linear-gradient(90deg, rgba(32,32,29,.045) 1px, transparent 1px); background-size: 32px 32px; }
+.soft-shadow { box-shadow: 0 18px 60px rgba(34, 35, 29, .08); }
+.question-card { animation: rise .35s ease both; }
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; animation-duration: .01ms !important; } }
